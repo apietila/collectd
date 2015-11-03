@@ -3328,6 +3328,36 @@ fi
 AM_CONDITIONAL(BUILD_WITH_LIBPCAP, test "x$with_libpcap" = "xyes")
 # }}}
 
+# --with-libtrace {{{
+AC_ARG_WITH(libtrace, [AS_HELP_STRING([--with-libtrace@<:@=PREFIX@:>@], [Path to libtrace.])],
+[
+	if test "x$withval" != "xno" && test "x$withval" != "xyes"
+	then
+		LDFLAGS="$LDFLAGS -L$withval/lib"
+		CPPFLAGS="$CPPFLAGS -I$withval/include"
+		with_libtrace="yes"
+	else
+		with_libtrace="$withval"
+	fi
+],
+[
+	with_libtrace="yes"
+])
+if test "x$with_libtrace" = "xyes"
+then
+	AC_CHECK_LIB(trace, trace_create,
+	[
+		AC_DEFINE(HAVE_LIBTRACE, 1, [Define to 1 if you have the libtracde library (-ltrace).])
+	], [with_libtrace="no (libtrace not found)"])
+fi
+if test "x$with_libtrace" = "xyes"
+then
+	AC_CHECK_HEADERS(libtrace.h,,
+			 [with_libtrace="no (libtrace.h not found)"])
+fi
+AM_CONDITIONAL(BUILD_WITH_LIBTRACE, test "x$with_libtrace" = "xyes")
+# }}}
+
 # --with-libperl {{{
 perl_interpreter="perl"
 AC_ARG_WITH(libperl, [AS_HELP_STRING([--with-libperl@<:@=PREFIX@:>@], [Path to libperl.])],
@@ -5748,6 +5778,7 @@ AC_PLUGIN([ted],         [$plugin_ted],        [Read The Energy Detective values
 AC_PLUGIN([thermal],     [$plugin_thermal],    [Linux ACPI thermal zone statistics])
 AC_PLUGIN([threshold],   [yes],                [Threshold checking plugin])
 AC_PLUGIN([tokyotyrant], [$with_libtokyotyrant],  [TokyoTyrant database statistics])
+AC_PLUGIN([tracewan],    [$with_libtrace],     [WAN interface statistics])
 AC_PLUGIN([turbostat],   [$plugin_turbostat],  [Advanced statistic on Intel cpu states])
 AC_PLUGIN([unixsock],    [yes],                [Unixsock communication plugin])
 AC_PLUGIN([uptime],      [$plugin_uptime],     [Uptime statistics])
@@ -6014,6 +6045,7 @@ Configuration:
     libsigrok   . . . . . $with_libsigrok
     libstatgrab . . . . . $with_libstatgrab
     libtokyotyrant  . . . $with_libtokyotyrant
+    libtrace  . . . . . . $with_libtrace
     libudev . . . . . . . $with_libudev
     libupsclient  . . . . $with_libupsclient
     libvarnish  . . . . . $with_libvarnish
@@ -6146,6 +6178,7 @@ Configuration:
     thermal . . . . . . . $enable_thermal
     threshold . . . . . . $enable_threshold
     tokyotyrant . . . . . $enable_tokyotyrant
+    tracewan  . . . . . . $enable_tracewan
     turbostat . . . . . . $enable_turbostat
     unixsock  . . . . . . $enable_unixsock
     uptime  . . . . . . . $enable_uptime

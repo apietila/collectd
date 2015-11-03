@@ -120,7 +120,7 @@ if BUILD_PLUGIN_AMQP
 pkglib_LTLIBRARIES += amqp.la
 amqp_la_SOURCES = amqp.c \
 		  utils_cmd_putval.c utils_cmd_putval.h \
-  	          utils_parse_option.c utils_parse_option.h \
+	          utils_parse_option.c utils_parse_option.h \
 		  utils_format_graphite.c utils_format_graphite.h \
 		  utils_format_json.c utils_format_json.h
 amqp_la_LDFLAGS = $(PLUGIN_LDFLAGS) $(BUILD_WITH_LIBRABBITMQ_LDFLAGS)
@@ -1106,6 +1106,13 @@ tokyotyrant_la_LIBADD  = $(BUILD_WITH_LIBTOKYOTYRANT_LIBS)
 if BUILD_WITH_LIBSOCKET
 tokyotyrant_la_LIBADD += -lsocket
 endif
+endif
+
+if BUILD_PLUGIN_TRACEWAN
+pkglib_LTLIBRARIES += tracewan.la
+tracewan_la_SOURCES = tracewan.c
+tracewan_la_LDFLAGS = $(PLUGIN_LDFLAGS)
+tracewan_la_LIBADD = -lm -ltrace -lpthread
 endif
 
 if BUILD_PLUGIN_TURBOSTAT

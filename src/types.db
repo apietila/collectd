@@ -212,6 +212,10 @@ total_sessions		value:DERIVE:0:U
 total_threads		value:DERIVE:0:U
 total_time_in_ms	value:DERIVE:0:U
 total_values		value:DERIVE:0:U
+trace_octets            outgoing:DERIVE:0:U, incoming:DERIVE:0:U
+trace_packets           outgoing:DERIVE:0:U, incoming:DERIVE:0:U
+trace_pktiv             outgoing:GAUGE:0:U, incoming:GAUGE:0:U
+trace_stats             value:GAUGE:0:U
 uptime			value:GAUGE:0:4294967295
 users			value:GAUGE:0:65535
 vcl			value:GAUGE:0:65535
