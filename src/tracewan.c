@@ -29,10 +29,11 @@
 
 #include <pthread.h>
 #include <poll.h>
-
-#include <libtrace.h>
 #include <math.h>
 #include <inttypes.h>
+
+// libtrace
+#include <libtrace.h>
 
 // See: http://www.wikiwand.com/en/Standard_deviation#/Rapid_calculation_methods
 #define _stddev(cnt, sum, ssq) sqrt(((double)(cnt)*ssq - sum*sum)/((double)(cnt*(cnt - 1))))
@@ -59,20 +60,24 @@ static pthread_mutex_t report_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t stat_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 typedef struct tracewan_report {
-  uint64_t count;
-  uint64_t bytes;
-  double sum;
-  double ssq;
-  double min;
-  double max;
-  double mean;
-  double std;
+  uint64_t count;  // packets
+  uint64_t bytes;  // bytes 
+  double sum;      // running sum of inter-arrivals
+  double ssq;      // running sum of squares
+  double min;      // smallest inter-arrival in report period
+  double max;      // largest inter-arrival in report period
+  double mean;     // report period inter-arrival mean
+  double std;      // report period inter-arrival std dev
+  double cv;       // report period inter-arrival cv (std/mean)
 } tracewan_report_t;
 
+// report per direction (in/out)
 static tracewan_report_t reports[2];
-static uint64_t packets_received;
-static uint64_t packets_dropped;
 
+static uint64_t packets_dropped = 0;
+static uint64_t packets_dropped_prev = 0;
+
+/* Clear out the reports. */
 static void tracewan_reset_report() {
   int dir;
   for (dir = 0; dir < 2; dir++) {  
@@ -84,11 +89,11 @@ static void tracewan_reset_report() {
     reports[dir].ssq = 0;
     reports[dir].mean = 0;
     reports[dir].std = 0;    
+    reports[dir].cv = 0;    
   }
-  packets_received = 0;
-  packets_dropped = 0;
 }
 
+/* Calculate stats. */
 static void tracewan_finalize_report() {
   int dir;
   for (dir = 0; dir < 2; dir++) {  
@@ -97,10 +102,17 @@ static void tracewan_finalize_report() {
       reports[dir].std = _stddev((reports[dir].count-1), 
 				 reports[dir].sum, 
 				 reports[dir].ssq);
+      if (reports[dir].mean > 0)
+	reports[dir].cv = reports[dir].std / reports[dir].mean;
+      if (reports[dir].min < 0)
+	reports[dir].min = 0.0;
+      if (reports[dir].max < 0)
+	reports[dir].max = 0.0;
     }
   }
 }
 
+/* Handle packet. */
 static void tracewan_packet_callback(libtrace_packet_t *packet, double prev_ts) {
     int dir;
     double ts, ia;
@@ -131,6 +143,7 @@ static void tracewan_packet_callback(libtrace_packet_t *packet, double prev_ts) 
     }
 }
 
+/* Main capture thread loop. */
 static int tracewan_run_loop(void) {
   libtrace_err_t err;
   libtrace_packet_t *packet;
@@ -177,10 +190,12 @@ static int tracewan_run_loop(void) {
 
   while (trace_read_packet(trace, packet)>0) {
     tracewan_packet_callback(packet, prev_ts);
+
+    // FIXME: avoid doing this / packet ?
     pthread_mutex_lock(&stat_mutex);
-    packets_received = trace_get_received_packets(trace);
     packets_dropped = trace_get_dropped_packets(trace);
     pthread_mutex_unlock(&stat_mutex);
+
     prev_ts = trace_get_seconds(packet);
   }
 
@@ -328,11 +343,21 @@ static int tracewan_init(void) {
 static int tracewan_read(void) {
   int dir;
   tracewan_report_t tmp[2];
-  uint64_t recv, drop;
+  uint64_t drop;
 
   pthread_mutex_lock(&stat_mutex);
-  recv = packets_received;
-  drop = packets_dropped;
+
+  // report stats per period
+  if (packets_dropped != UINT64_MAX) {
+    drop = packets_dropped - packets_dropped_prev;
+    if (drop < 0) { // overflow
+      drop = abs(drop) + packets_dropped;
+    }
+    packets_dropped_prev = packets_dropped;
+  } else {
+    drop = UINT64_MAX;
+  }
+
   pthread_mutex_unlock(&stat_mutex);
 
   // get a copy of the report and reset
@@ -365,9 +390,11 @@ static int tracewan_read(void) {
   submit_gauge("trace_pktiv", "std", 
 	       tmp[TRACE_OUTGOING].std, 
 	       tmp[TRACE_INCOMING].std); 
+  
+  submit_gauge("trace_pktiv", "cv", 
+	       tmp[TRACE_OUTGOING].cv, 
+	       tmp[TRACE_INCOMING].cv); 
 
-  if (recv != UINT64_MAX)
-    submit_gauge_value("trace_stats", "received", recv);  
   if (drop != UINT64_MAX)
     submit_gauge_value("trace_stats", "dropped", drop);
 

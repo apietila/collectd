@@ -3358,6 +3358,36 @@ fi
 AM_CONDITIONAL(BUILD_WITH_LIBTRACE, test "x$with_libtrace" = "xyes")
 # }}}
 
+# --with-libtcptools {{{
+AC_ARG_WITH(libtcptools, [AS_HELP_STRING([--with-libtcptools@<:@=PREFIX@:>@], [Path to libtcptools.])],
+[
+	if test "x$withval" != "xno" && test "x$withval" != "xyes"
+	then
+		LDFLAGS="$LDFLAGS -L$withval/lib"
+		CPPFLAGS="$CPPFLAGS -I$withval/include"
+		with_libtcptools="yes"
+	else
+		with_libtcptools="$withval"
+	fi
+],
+[
+	with_libtcptools="yes"
+])
+if test "x$with_libtcptools" = "xyes"
+then
+	AC_CHECK_LIB(tcptools,  session_manager_create,
+	[
+		AC_DEFINE(HAVE_LIBTRACE, 1, [Define to 1 if you have the libtcptools library (-ltcptools).])
+	], [with_libtcptools="no (libtcptools not found)"])
+fi
+if test "x$with_libtcptools" = "xyes"
+then
+	AC_CHECK_HEADERS(sessionmanager.h,,
+			 [with_libtcptools="no (sessionmanager.h not found)"])
+fi
+AM_CONDITIONAL(BUILD_WITH_LIBTCPTOOLS, test "x$with_libtcptools" = "xyes")
+# }}}
+
 # --with-libperl {{{
 perl_interpreter="perl"
 AC_ARG_WITH(libperl, [AS_HELP_STRING([--with-libperl@<:@=PREFIX@:>@], [Path to libperl.])],
@@ -5778,7 +5808,8 @@ AC_PLUGIN([ted],         [$plugin_ted],        [Read The Energy Detective values
 AC_PLUGIN([thermal],     [$plugin_thermal],    [Linux ACPI thermal zone statistics])
 AC_PLUGIN([threshold],   [yes],                [Threshold checking plugin])
 AC_PLUGIN([tokyotyrant], [$with_libtokyotyrant],  [TokyoTyrant database statistics])
-AC_PLUGIN([tracewan],    [$with_libtrace],     [WAN interface statistics])
+AC_PLUGIN([tracelan],    [$with_libtrace],     [LAN interface statistics with libtrace])
+AC_PLUGIN([tracewan],    [$with_libtrace],     [WAN interface statistics with libtrace])
 AC_PLUGIN([turbostat],   [$plugin_turbostat],  [Advanced statistic on Intel cpu states])
 AC_PLUGIN([unixsock],    [yes],                [Unixsock communication plugin])
 AC_PLUGIN([uptime],      [$plugin_uptime],     [Uptime statistics])
@@ -6045,6 +6076,7 @@ Configuration:
     libsigrok   . . . . . $with_libsigrok
     libstatgrab . . . . . $with_libstatgrab
     libtokyotyrant  . . . $with_libtokyotyrant
+    libtcptools . . . . . $with_libtcptools
     libtrace  . . . . . . $with_libtrace
     libudev . . . . . . . $with_libudev
     libupsclient  . . . . $with_libupsclient
@@ -6178,6 +6210,7 @@ Configuration:
     thermal . . . . . . . $enable_thermal
     threshold . . . . . . $enable_threshold
     tokyotyrant . . . . . $enable_tokyotyrant
+    tracelan  . . . . . . $enable_tracelan
     tracewan  . . . . . . $enable_tracewan
     turbostat . . . . . . $enable_turbostat
     unixsock  . . . . . . $enable_unixsock

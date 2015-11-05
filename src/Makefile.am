@@ -1108,6 +1108,13 @@ tokyotyrant_la_LIBADD += -lsocket
 endif
 endif
 
+if BUILD_PLUGIN_TRACELAN
+pkglib_LTLIBRARIES += tracelan.la
+tracelan_la_SOURCES = tracelan.c
+tracelan_la_LDFLAGS = $(PLUGIN_LDFLAGS)
+tracelan_la_LIBADD = -lm -ltrace -ltcptools -lpthread
+endif
+
 if BUILD_PLUGIN_TRACEWAN
 pkglib_LTLIBRARIES += tracewan.la
 tracewan_la_SOURCES = tracewan.c
