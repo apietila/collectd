@@ -30,6 +30,7 @@
 #include <pthread.h>
 #include <poll.h>
 #include <math.h>
+#include <time.h>
 #include <inttypes.h>
 
 // libtrace
@@ -74,8 +75,10 @@ typedef struct tracewan_report {
 // report per direction (in/out)
 static tracewan_report_t reports[2];
 
+// dropped in this report period
 static uint64_t packets_dropped = 0;
 static uint64_t packets_dropped_prev = 0;
+static uint64_t packets_ignored = 0;
 
 /* Clear out the reports. */
 static void tracewan_reset_report() {
@@ -112,23 +115,34 @@ static void tracewan_finalize_report() {
   }
 }
 
+/* Substract two 'struct timespec' timestamps and return
+ * the result as double in microseconds.
+ */
+static double timespec_subtract(struct timespec *x, struct timespec *y) {
+  double x1 = (x->tv_sec * 1000000.0) + x->tv_nsec / 1000.0;
+  double y1 = (y->tv_sec * 1000000.0) + y->tv_nsec / 1000.0;
+  return (x1 - y1);
+}
+
 /* Handle packet. */
-static void tracewan_packet_callback(libtrace_packet_t *packet, double prev_ts) {
+static void tracewan_packet_callback(libtrace_packet_t *packet, 
+				     struct timespec *prev_ts) {
     int dir;
-    double ts, ia;
+    double ia;
+    struct timespec ts;
 
     dir = trace_get_direction(packet);   
 
     if (dir == TRACE_OUTGOING || dir == TRACE_INCOMING) {
-      ts = trace_get_seconds(packet);
-
       pthread_mutex_lock(&report_mutex);
+
+      ts = trace_get_timespec(packet);
 
       reports[dir].count++;
       reports[dir].bytes += trace_get_wire_length(packet);
 
-      if (prev_ts >= 0) {
-	ia = (ts - prev_ts) * 1000.0; // in ms
+      if (prev_ts->tv_sec) {
+	ia = timespec_subtract(&ts, prev_ts); // in microsec
 	reports[dir].sum += ia;
 	reports[dir].ssq += (ia*ia);
 
@@ -140,6 +154,10 @@ static void tracewan_packet_callback(libtrace_packet_t *packet, double prev_ts) 
       }
 
       pthread_mutex_unlock(&report_mutex);
+    } else {
+      pthread_mutex_lock(&stat_mutex);
+      ++packets_ignored;
+      pthread_mutex_unlock(&stat_mutex);
     }
 }
 
@@ -148,7 +166,7 @@ static int tracewan_run_loop(void) {
   libtrace_err_t err;
   libtrace_packet_t *packet;
   libtrace_t *trace;
-  double prev_ts = -1.0;
+  struct timespec prev_ts = {0, 0};
   int snaplen = TRACE_SNAPLEN;
 
   /* Don't block any signals */
@@ -189,14 +207,13 @@ static int tracewan_run_loop(void) {
   packet = trace_create_packet();
 
   while (trace_read_packet(trace, packet)>0) {
-    tracewan_packet_callback(packet, prev_ts);
+    tracewan_packet_callback(packet, &prev_ts);
+    prev_ts = trace_get_timespec(packet);
 
     // FIXME: avoid doing this / packet ?
     pthread_mutex_lock(&stat_mutex);
     packets_dropped = trace_get_dropped_packets(trace);
     pthread_mutex_unlock(&stat_mutex);
-
-    prev_ts = trace_get_seconds(packet);
   }
 
   trace_destroy_packet(packet);
@@ -245,24 +262,6 @@ static void *tracewan_child_loop(__attribute__((unused)) void *dummy) {
   }
   listen_thread_init = 0;
   return (NULL);
-}
-
-static void submit_derive(const char *type, 
-			  derive_t out, 
-			  derive_t in) {
-  value_t values[2];
-  value_list_t vl = VALUE_LIST_INIT;
-  
-  values[0].derive = out;
-  values[1].derive = in;
-  
-  vl.values = values;
-  vl.values_len = 2;
-  sstrncpy(vl.host, hostname_g, sizeof (vl.host));
-  sstrncpy(vl.plugin, "tracewan", sizeof (vl.plugin));
-  sstrncpy(vl.type, type, sizeof (vl.type));
-  
-  plugin_dispatch_values (&vl);
 }
 
 static void submit_gauge(const char *type, 
@@ -343,7 +342,7 @@ static int tracewan_init(void) {
 static int tracewan_read(void) {
   int dir;
   tracewan_report_t tmp[2];
-  uint64_t drop;
+  uint64_t drop, ignore;
 
   pthread_mutex_lock(&stat_mutex);
 
@@ -358,6 +357,10 @@ static int tracewan_read(void) {
     drop = UINT64_MAX;
   }
 
+  // packets with unknown direction
+  ignore = packets_ignored;
+  packets_ignored = 0;
+
   pthread_mutex_unlock(&stat_mutex);
 
   // get a copy of the report and reset
@@ -370,10 +373,13 @@ static int tracewan_read(void) {
   pthread_mutex_unlock(&report_mutex);
 
   // submit values
-  submit_derive("trace_packets", 
-		tmp[TRACE_OUTGOING].count, tmp[TRACE_INCOMING].count); 
-  submit_derive("trace_octets",
-		tmp[TRACE_OUTGOING].bytes, tmp[TRACE_INCOMING].bytes); 
+  submit_gauge("trace_stats", "packets", 
+	       tmp[TRACE_OUTGOING].count, 
+	       tmp[TRACE_INCOMING].count); 
+
+  submit_gauge("trace_stats", "octets", 
+	       tmp[TRACE_OUTGOING].bytes, 
+	       tmp[TRACE_INCOMING].bytes); 
 
   submit_gauge("trace_pktiv", "min", 
 	       tmp[TRACE_OUTGOING].min, 
@@ -396,7 +402,8 @@ static int tracewan_read(void) {
 	       tmp[TRACE_INCOMING].cv); 
 
   if (drop != UINT64_MAX)
-    submit_gauge_value("trace_stats", "dropped", drop);
+    submit_gauge_value("trace_mod_stats", "dropped", drop);
+  submit_gauge_value("trace_mod_stats", "ignored", ignore);
 
   return (0);
 }
