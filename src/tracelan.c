@@ -51,13 +51,16 @@
  */
 static const char *config_keys[] =
 {
-  "Interface"
+  "Interface",
+  "Aggregate"
 };
 static int config_keys_num = STATIC_ARRAY_SIZE (config_keys);
 
 // TODO: could support multiple (lan) interfaces, now assume we
 // capture on the br-lan (or equivalent) to get all LAN traffic 
 static char *interface = NULL;
+
+static int report_aggregate = 0; // by default, report per client
 
 static pthread_t       listen_thread;
 static int             listen_thread_init = 0;
@@ -80,16 +83,21 @@ typedef struct tracelan_report {
   double std;        // report period RTT std dev
 } tracelan_report_t;
 
-// report per client (TODO: max num of clients, or use hashtable ?)
+// report per client (TODO: max num of clients, or use a hashtable ?)
 static tracelan_report_t reports[32];
 static int report_len = 32;
 
+// pkts dropped in kernel
 static uint64_t packets_dropped = 0;
 static uint64_t packets_dropped_prev = 0;
+// pkts ignored (missing direction)
+static uint64_t packets_ignored = 0;
+// pkts handled
+static uint64_t packets_processed = 0;
 
 /* Clear out the reports. */
 static void tracelan_reset_report() {
-  int i;
+  int i,j;
   for (i = 0; i < report_len; i++) {  
     reports[i].count_in = 0;
     reports[i].bytes_in = 0;
@@ -102,6 +110,8 @@ static void tracelan_reset_report() {
     reports[i].ssq = 0;
     reports[i].mean = 0;
     reports[i].std = 0;    
+    for (j = 0; j < 6; j++)
+      reports[i].mac[j] = 0;
     reports[i].used = 0;
   }
 }
@@ -109,76 +119,100 @@ static void tracelan_reset_report() {
 /* Calculate stats. */
 static void tracelan_finalize_report() {
   int i;
-  for (i = 0; i < report_len; i++) {  
-    if (reports[i].used && reports[i].samples > 1) {
-      reports[i].mean = reports[i].sum/(reports[i].samples);
-      reports[i].std = _stddev((reports[i].samples), 
+  for (i = 0; i < report_len && reports[i].used; i++) {  
+    if (reports[i].samples > 1) {
+      reports[i].mean = reports[i].sum/reports[i].samples;
+      reports[i].std = _stddev(reports[i].samples, 
 			       reports[i].sum, 
 			       reports[i].ssq);
-      if (reports[i].min < 0)
-	reports[i].min = 0.0;
-      if (reports[i].max < 0)
-	reports[i].max = 0.0;
     }
+    if (reports[i].min < 0)
+      reports[i].min = 0.0;
+    if (reports[i].max < 0)
+      reports[i].max = 0.0;
   }
 }
  
 /* Handle packet. */
-static void tracelan_packet_callback(libtrace_packet_t *packet, tcp_session_t *session) {
+static void tracelan_packet_callback(libtrace_packet_t *packet, 
+				     tcp_session_t *session) {
   double rtt;
   int dir, i;   
-  uint8_t *mac;
-  uint64_t h;
-  tracelan_report_t r;
+  uint8_t *mac = NULL;
+  uint64_t h = 0;
 
   dir = trace_get_direction(packet);
+
   if (!(dir == TRACE_OUTGOING || dir == TRACE_INCOMING)) {
+    WARNING("tracelan plugin: invalid direction, got %d", dir);
+    pthread_mutex_lock(&stat_mutex);
+    ++packets_ignored;
+    pthread_mutex_unlock(&stat_mutex);
     return; // unknown direction
   }
 
+  pthread_mutex_lock(&stat_mutex);
+  ++packets_processed;
+  pthread_mutex_unlock(&stat_mutex);
+
   // the LAN client mac
-  if (dir == TRACE_OUTGOING)
+  if (report_aggregate) {
+    mac = NULL; // no per client reporting
+  } else if (dir == TRACE_OUTGOING) {
     mac = trace_get_destination_mac(packet);
-  else
+  } else {
     mac = trace_get_source_mac(packet);
+  }
+
+  if (!report_aggregate && mac==NULL) {
+    WARNING("tracelan plugin: empty mac adress");
+    pthread_mutex_lock(&stat_mutex);
+    ++packets_ignored;
+    pthread_mutex_unlock(&stat_mutex);
+    return; // unknown mac
+  }
 
   // report table index
   h = 0;
-  for (i=0; i<6; i++) 
-    h = (h<<8) + mac[i];
-  h = h%report_len;
+  if (!report_aggregate) {
+    for (i=0; i<6; i++) 
+      h = (h<<8) + mac[i];
+    h = h%report_len;
+  }
 
   pthread_mutex_lock(&report_mutex);
 
-  // FIXME: collisions!!
-  r = reports[h];
-  if (!r.used) {
+  // FIXME: handle collisions!!
+  if (!reports[h].used) {
+    // first time we see this node
     for (i=0; i<6; i++) 
-      r.mac[i] = mac[i];
-    r.used = 1;
+      reports[h].mac[i] = (mac != NULL ? mac[i] : (uint8_t)i);
+    reports[h].used = 1;
   }
 
   if (dir == TRACE_OUTGOING) {
     // going towards the node
-    r.count_out++;
-    r.bytes_out += trace_get_wire_length(packet);
+    reports[h].count_out++;
+    reports[h].bytes_out += trace_get_wire_length(packet);
+
   } else {
     // coming in from the node
-    r.count_in++;
-    r.bytes_in += trace_get_wire_length(packet);
+    reports[h].count_in++;
+    reports[h].bytes_in += trace_get_wire_length(packet);
     
     if (session != NULL) {
       // RTT to the node (from outgoing DATA + incoming ACK)
       rtt = rtt_n_sequence_last_sample(session->data[0]);
+
       if (rtt > 0) {
-	rtt = rtt * 1000.0; // in ms
-	r.samples += 1;
-	r.sum += rtt;
-	r.ssq += (rtt*rtt);
-	if (r.min < 0 || rtt < r.min)
-	  r.min = rtt;
-	if (r.max < 0 || rtt > r.max)
-	  r.max = rtt;
+	rtt = rtt * 1000.0; // in milliseconds
+	reports[h].samples += 1;
+	reports[h].sum += rtt;
+	reports[h].ssq += (rtt*rtt);
+	if (reports[h].min < 0 || rtt < reports[h].min)
+	  reports[h].min = rtt;
+	if (reports[h].max < 0 || rtt > reports[h].max)
+	  reports[h].max = rtt;
       }
     }
   }
@@ -240,7 +274,8 @@ static int tracelan_run_loop(void) {
   packet = trace_create_packet();
 
   while (trace_read_packet(trace, packet)>0) {
-    tracelan_packet_callback(packet,session_manager_update(sm,packet));
+    tracelan_packet_callback(packet,
+			     session_manager_update(sm,packet));
 
     // FIXME: avoid doing this / packet ?
     pthread_mutex_lock(&stat_mutex);
@@ -298,31 +333,34 @@ static void *tracelan_child_loop(__attribute__((unused)) void *dummy) {
   return (NULL);
 }
 
-// trace_[packets|octets] in/out per client
-static void submit_derive(const char *client, 
-			  const char *type, 
-			  derive_t out, 
-			  derive_t in) {
+static void submit_gauge(const char *plugin_instance, 
+			 const char *type, 
+			 const char *type_instance, 
+			 gauge_t out, gauge_t in) {
   value_t values[2];
   value_list_t vl = VALUE_LIST_INIT;
-  
-  values[0].derive = out;
-  values[1].derive = in;
+
+  values[0].gauge = out;
+  values[1].gauge = in;
   
   vl.values = values;
   vl.values_len = 2;
-  sstrncpy(vl.host, hostname_g, sizeof (vl.host));
-  if (client)
-    sstrncpy (vl.plugin_instance, client, sizeof (vl.plugin_instance));
-  sstrncpy(vl.plugin, "tracelan", sizeof (vl.plugin));
-  sstrncpy(vl.type, type, sizeof (vl.type));
+
+  sstrncpy (vl.host, hostname_g, sizeof (vl.host));
+  sstrncpy (vl.plugin, "tracelan", sizeof (vl.plugin));
+  if (plugin_instance != NULL)
+    sstrncpy (vl.plugin_instance, plugin_instance, sizeof (vl.plugin_instance));
+  sstrncpy (vl.type, type, sizeof (vl.type));
+  sstrncpy (vl.type_instance, type_instance, sizeof (vl.type_instance));
   
+  DEBUG("tracelan plugin: dispatch %s::%s::%s gauge[%d]",
+	(plugin_instance != NULL ? plugin_instance : "na"),
+	type, type_instance, vl.values_len);
+
   plugin_dispatch_values (&vl);
 }
 
-// trace_stats <dropped|received> (no client)
-// trace_rtt <min|max|mean|std> per client
-static void submit_gauge_value(const char *client, 
+static void submit_gauge_value(const char *plugin_instance, 
 			       const char *type, 
 			       const char *type_instance, 
 			       gauge_t value) {
@@ -333,13 +371,18 @@ static void submit_gauge_value(const char *client,
   
   vl.values = values;
   vl.values_len = 1;
+
   sstrncpy (vl.host, hostname_g, sizeof (vl.host));
   sstrncpy (vl.plugin, "tracelan", sizeof (vl.plugin));
-  if (client != NULL)
-    sstrncpy (vl.plugin_instance, client, sizeof (vl.plugin_instance));
+  if (plugin_instance != NULL)
+    sstrncpy (vl.plugin_instance, plugin_instance, sizeof (vl.plugin_instance));
   sstrncpy (vl.type, type, sizeof (vl.type));
   sstrncpy (vl.type_instance, type_instance, sizeof (vl.type_instance));
   
+  DEBUG("tracelan plugin: dispatch %s::%s::%s gauge[%d]",
+	(plugin_instance != NULL ? plugin_instance : "na"),
+	type, type_instance, vl.values_len);
+
   plugin_dispatch_values (&vl);
 }
 
@@ -347,10 +390,14 @@ static int tracelan_config(const char *key, const char *value) {
   if (strcasecmp(key, "Interface") == 0) {
     if (interface != NULL)
       free(interface);
-
     if ((interface = strdup(value)) == NULL)
       return (1);
+
+  } else if (strcasecmp(key, "Aggregate") == 0) {
+    if (value != NULL)
+      report_aggregate = 1;
   }
+
   return (0);
 }
 
@@ -382,7 +429,7 @@ static int tracelan_init(void) {
 
 static int tracelan_read(void) {
   int i,j;
-  uint64_t drop;
+  uint64_t drop, ign, proc;
   tracelan_report_t tmp[report_len];
   char mac[18];
 
@@ -398,6 +445,11 @@ static int tracelan_read(void) {
   } else {
     drop = UINT64_MAX;
   }
+
+  ign = packets_ignored;
+  packets_ignored = 0;
+  proc = packets_processed;
+  packets_processed = 0;
 
   pthread_mutex_unlock(&stat_mutex);
 
@@ -419,31 +471,33 @@ static int tracelan_read(void) {
 
   // submit values per client
   for (i = 0; i < report_len; i++) {  
-    tracelan_report_t r = tmp[i];
-    if (r.used && (r.count_in + r.count_out) > 0) {
-      unsigned char *addr = (unsigned char *)r.mac;
+    if (tmp[i].used && (tmp[i].count_in + tmp[i].count_out) > 0) {
+      unsigned char *addr = (unsigned char *)tmp[i].mac;
       snprintf(mac, 18, "%02hhx:%02hhx:%02hhx:%02hhx:%02hhx:%02hhx", 
 	       addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]);
 
       // traffic
-      submit_derive(mac, "trace_packets", 
-		    r.count_in, r.count_out); 
-      submit_derive(mac, "trace_octets",
-		    r.bytes_in, r.bytes_out); 
+      submit_gauge(mac, "trace_stats", "packets", 
+		   tmp[i].count_in, tmp[i].count_out); 
+
+      submit_gauge(mac, "trace_stats", "octets",
+		   tmp[i].bytes_in, tmp[i].bytes_out); 
 
       // RTT stats
-      if (r.samples>0) {
-	submit_gauge_value(mac, "trace_rtt", "samples", r.samples);  
-	submit_gauge_value(mac, "trace_rtt", "min", r.min);  
-	submit_gauge_value(mac, "trace_rtt", "max", r.max);  
-	submit_gauge_value(mac, "trace_rtt", "mean", r.mean);  
-	submit_gauge_value(mac, "trace_rtt", "std", r.std);  
+      if (tmp[i].samples>0) {
+	submit_gauge_value(mac, "trace_rtt", "samples", tmp[i].samples);  
+	submit_gauge_value(mac, "trace_rtt", "min", tmp[i].min);  
+	submit_gauge_value(mac, "trace_rtt", "max", tmp[i].max);  
+	submit_gauge_value(mac, "trace_rtt", "mean", tmp[i].mean);  
+	submit_gauge_value(mac, "trace_rtt", "std", tmp[i].std);  
       }
     }
   }
 
   if (drop != UINT64_MAX)
-    submit_gauge_value(NULL, "trace_stats", "dropped", drop);
+    submit_gauge_value(NULL, "trace_mod_stats", "dropped", drop);
+  submit_gauge_value(NULL, "trace_mod_stats", "ignored", ign);
+  submit_gauge_value(NULL, "trace_mod_stats", "processed", proc);
 
   return (0);
 }

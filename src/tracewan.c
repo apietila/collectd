@@ -107,11 +107,11 @@ static void tracewan_finalize_report() {
 				 reports[dir].ssq);
       if (reports[dir].mean > 0)
 	reports[dir].cv = reports[dir].std / reports[dir].mean;
-      if (reports[dir].min < 0)
-	reports[dir].min = 0.0;
-      if (reports[dir].max < 0)
-	reports[dir].max = 0.0;
     }
+    if (reports[dir].min < 0)
+      reports[dir].min = 0.0;
+    if (reports[dir].max < 0)
+      reports[dir].max = 0.0;
   }
 }
 
