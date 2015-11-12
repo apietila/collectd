@@ -69,7 +69,7 @@ static pthread_mutex_t stat_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 typedef struct tracelan_report {
   uint8_t used;
-  uint8_t mac[6];
+  uint8_t mac[6];    // local client mac
   uint64_t count_in;
   uint64_t bytes_in;
   uint64_t count_out;
@@ -159,8 +159,10 @@ static void tracelan_packet_callback(libtrace_packet_t *packet,
   if (report_aggregate) {
     mac = NULL; // no per client reporting
   } else if (dir == TRACE_OUTGOING) {
+    // out to LAN, dst is the LAN client
     mac = trace_get_destination_mac(packet);
   } else {
+    // in from LAN, src is the LAN client
     mac = trace_get_source_mac(packet);
   }
 
