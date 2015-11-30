@@ -357,7 +357,7 @@ static void submit_gauge(const char *plugin_instance,
   
   DEBUG("tracelan plugin: dispatch %s::%s::%s gauge[%d]",
 	(plugin_instance != NULL ? plugin_instance : "na"),
-	type, type_instance, vl.values_len);
+	type, type_instance, (int)vl.values_len);
 
   plugin_dispatch_values (&vl);
 }
@@ -383,7 +383,7 @@ static void submit_gauge_value(const char *plugin_instance,
   
   DEBUG("tracelan plugin: dispatch %s::%s::%s gauge[%d]",
 	(plugin_instance != NULL ? plugin_instance : "na"),
-	type, type_instance, vl.values_len);
+	type, type_instance, (int)vl.values_len);
 
   plugin_dispatch_values (&vl);
 }
