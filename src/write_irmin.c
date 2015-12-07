@@ -1,9 +1,8 @@
 /**
- * collectd - src/write_irmin.c
+ * collectd - src/write_http.c
  * Copyright (C) 2009       Paul Sadauskas
  * Copyright (C) 2009       Doug MacEachern
  * Copyright (C) 2007-2014  Florian octo Forster
- * Copyright (C) 2015       A-K Pietilainen
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the
@@ -18,17 +17,17 @@
  * with this program; if not, write to the Free Software Foundation, Inc.,
  * 51 Franklin St, Fifth Floor, Boston, MA  02110-1301 USA
  *
+ * Modified from write_http.c to work with irmin-www (UCN Y2 demos).
+ *
  * Authors:
- *   Florian octo Forster <octo at collectd.org>
- *   Doug MacEachern <dougm@hyperic.com>
- *   Paul Sadauskas <psadauskas@gmail.com>
- *   A-K Pietilainen <annakaisa.pietilainen@gmail.com> 
+ *   Anna-Kaisa Pietilainen <anna-kaisa.pietilainen@inria.fr>
  **/
 
 #include "collectd.h"
 #include "plugin.h"
 #include "common.h"
 #include "utils_cache.h"
+#include "utils_format_json.h"
 
 #if HAVE_PTHREAD_H
 # include <pthread.h>
@@ -47,7 +46,7 @@ struct wi_callback_s
 {
         char *name;
 
-        char *location;
+        char *location; // base URL
         char *user;
         char *pass;
         char *credentials;
@@ -99,6 +98,10 @@ static void wi_reset_buffer (wi_callback_t *cb)  /* {{{ */
         cb->send_buffer_free = cb->send_buffer_size;
         cb->send_buffer_fill = 0;
         cb->send_buffer_init_time = cdtime ();
+
+	format_json_initialize (cb->send_buffer,
+                                &cb->send_buffer_fill,
+                                &cb->send_buffer_free);
 } /* }}} wi_reset_buffer */
 
 static int wi_send_buffer (wi_callback_t *cb) /* {{{ */
@@ -152,6 +155,7 @@ static int wi_callback_init (wi_callback_t *cb) /* {{{ */
         headers = NULL;
         headers = curl_slist_append (headers, "Accept:  */*");
 	headers = curl_slist_append (headers, "Content-Type: application/json");
+
         headers = curl_slist_append (headers, "Expect:");
         curl_easy_setopt (cb->curl, CURLOPT_HTTPHEADER, headers);
 
@@ -229,10 +233,21 @@ static int wi_flush_nolock (cdtime_t timeout, wi_callback_t *cb) /* {{{ */
                         return (0);
         }
 
-	if (cb->send_buffer_fill <= 0)
+	if (cb->send_buffer_fill <= 2)
 	  {
 	    cb->send_buffer_init_time = cdtime ();
 	    return (0);
+	  }
+
+	status = format_json_finalize (cb->send_buffer,
+				       &cb->send_buffer_fill,
+				       &cb->send_buffer_free);
+	if (status != 0)
+	  {
+	    ERROR ("write_irmin: wi_flush_nolock: "
+		   "format_json_finalize failed.");
+	    wi_reset_buffer (cb);
+	    return (status);
 	  }
 
 	status = wi_send_buffer (cb);
@@ -303,16 +318,12 @@ static void wi_callback_free (void *data) /* {{{ */
         sfree (cb);
 } /* }}} void wi_callback_free */
 
-static int wi_write_command (const data_set_t *ds, const value_list_t *vl, /* {{{ */
+static int wi_write_json (const data_set_t *ds, const value_list_t *vl, /* {{{ */
                 wi_callback_t *cb)
 {
-        char key[10*DATA_MAX_NAME_LEN];
-        char values[512];
-        char command[2048];
-        size_t command_len;
-        size_t location_len;
-
         int status;
+        char key[10*DATA_MAX_NAME_LEN];
+        size_t location_len;
 
         /* Copy the identifier to `key' and escape it. */
         status = FORMAT_VL (key, sizeof (key), vl);
@@ -321,25 +332,6 @@ static int wi_write_command (const data_set_t *ds, const value_list_t *vl, /* {{
 	  return (status);
         }
         escape_string (key, sizeof (key));
-
-        /* Convert the values to an ASCII representation and put that into
-         * `values'. */
-        status = format_values (values, sizeof (values), ds, vl, cb->store_rates);
-        if (status != 0) {
-                ERROR ("write_irmin plugin: error with "
-                                "wi_value_list_to_string");
-                return (status);
-        }
-
-        command_len = (size_t) ssnprintf (command, sizeof (command),
-                        "{\"task\":{\"date\":\"%.0f\",\"uid\":\"0\",\"owner\":\"collectd\",\"messages\":[\"update key\"]},\"params\":\"%s\"}",
-                        CDTIME_T_TO_DOUBLE (vl->time),
-                        values);
-        if (command_len >= sizeof (command)) {
-                ERROR ("write_irmin plugin: Command buffer too small: "
-		       "Need %zu bytes.", command_len + 1);
-                return (-1);
-        }
 	
         pthread_mutex_lock (&cb->send_lock);
 
@@ -354,44 +346,59 @@ static int wi_write_command (const data_set_t *ds, const value_list_t *vl, /* {{
                 }
         }
 
-	/* set the URL of this object (path changes depending on the key + time)
-	   this allows libcurl to reuse the connection (server wont change) */
+        /* set the URL of this object (path changes depending on the key + time)
+           this allows libcurl to reuse the connection (server wont change) */
         location_len = (size_t) ssnprintf (cb->send_location, 
-					   sizeof (cb->send_location),
-					   "%s/update/%s/%.0f",
-					   cb->location, 
-					   key,
-					   CDTIME_T_TO_DOUBLE (vl->time));
+                                           sizeof (cb->send_location),
+                                           "%s/%s/%.0f",
+                                           cb->location, 
+                                           key,
+                                           CDTIME_T_TO_DOUBLE (vl->time));
         if (location_len >= sizeof (cb->send_location)) {
-	  ERROR ("write_irmin plugin: Location buffer too small: "
-		 "Need %zu bytes.", location_len + 1);
-	  return (-1);
+          ERROR ("write_irmin plugin: Location buffer too small: "
+                 "Need %zu bytes.", location_len + 1);
+          return (-1);
         }
         curl_easy_setopt(cb->curl, CURLOPT_URL, cb->send_location);
 
-        assert (command_len < cb->send_buffer_free);
+        status = format_json_value_list (cb->send_buffer,
+                        &cb->send_buffer_fill,
+                        &cb->send_buffer_free,
+                        ds, vl, cb->store_rates);
+        if (status == (-ENOMEM))
+        {
+                status = wi_flush_nolock (/* timeout = */ 0, cb);
+                if (status != 0)
+                {
+                        wi_reset_buffer (cb);
+                        pthread_mutex_unlock (&cb->send_lock);
+                        return (status);
+                }
 
-        /* `command_len + 1' because `command_len' does not include the
-         * trailing null byte. Neither does `send_buffer_fill'. */
-        memcpy (cb->send_buffer + cb->send_buffer_fill,
-                        command, command_len + 1);
-        cb->send_buffer_fill += command_len;
-        cb->send_buffer_free -= command_len;
+                status = format_json_value_list (cb->send_buffer,
+                                &cb->send_buffer_fill,
+                                &cb->send_buffer_free,
+                                ds, vl, cb->store_rates);
+        }
+        if (status != 0)
+        {
+                pthread_mutex_unlock (&cb->send_lock);
+                return (status);
+        }
 
-        DEBUG ("write_irmin plugin: <%s> buffer %zu/%zu (%g%%) \"%s\"",
-                        cb->send_location,
-                        cb->send_buffer_fill, cb->send_buffer_size,
-                        100.0 * ((double) cb->send_buffer_fill) / ((double) cb->send_buffer_size),
-                        command);
+        DEBUG ("write_irmin plugin: <%s> buffer %zu/%zu (%g%%)",
+	       cb->send_location,
+	       cb->send_buffer_fill, cb->send_buffer_size,
+	       100.0 * ((double) cb->send_buffer_fill) / ((double) cb->send_buffer_size));
 
 	// flush right away as the path will change for next cmd
-	status = wi_flush_nolock (/* timeout = */ 0, cb);
-
+        status = wi_flush_nolock (/* timeout = */ 0, cb);
+	
         /* Check if we have enough space for this command. */
         pthread_mutex_unlock (&cb->send_lock);
 
-        return (status);
-} /* }}} int wi_write_command */
+        return (0);
+} /* }}} int wi_write_json */
 
 static int wi_write (const data_set_t *ds, const value_list_t *vl, /* {{{ */
                 user_data_t *user_data)
@@ -404,7 +411,7 @@ static int wi_write (const data_set_t *ds, const value_list_t *vl, /* {{{ */
 
         cb = user_data->data;
 
-	status = wi_write_command (ds, vl, cb);
+	status = wi_write_json (ds, vl, cb);
 
         return (status);
 } /* }}} int wi_write */
@@ -591,7 +598,7 @@ static int wi_init (void) /* {{{ */
 void module_register (void) /* {{{ */
 {
         plugin_register_complex_config ("write_irmin", wi_config);
-        plugin_register_init ("write_rimin", wi_init);
+        plugin_register_init ("write_irmin", wi_init);
 } /* }}} void module_register */
 
 /* vim: set fdm=marker sw=8 ts=8 tw=78 et : */
