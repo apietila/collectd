@@ -83,9 +83,9 @@ typedef struct tracelan_report {
   double std;        // report period RTT std dev
 } tracelan_report_t;
 
-// report per client (TODO: max num of clients, or use a hashtable ?)
-static tracelan_report_t reports[32];
-static int report_len = 32;
+// report per client - linear search hashtable
+static tracelan_report_t reports[53];
+static int report_len = 53;
 
 // pkts dropped in kernel
 static uint64_t packets_dropped = 0;
@@ -180,7 +180,7 @@ static void tracelan_packet_callback(libtrace_packet_t *packet,
     for (i=0; i<6; i++) 
       h = (h<<8) + mac[i];
     h = h%report_len;
-  }
+  } // else just a single report for all
 
   pthread_mutex_lock(&report_mutex);
 
