@@ -207,7 +207,6 @@ static void tracelan_packet_callback(libtrace_packet_t *packet,
       rtt = rtt_n_sequence_last_sample(session->data[0]);
 
       if (rtt > 0) {
-	rtt = rtt * 1000.0; // in milliseconds
 	reports[h].samples += 1;
 	reports[h].sum += rtt;
 	reports[h].ssq += (rtt*rtt);
@@ -490,6 +489,7 @@ static int tracelan_read(void) {
 	submit_gauge_value(mac, "trace_rtt", "samples", tmp[i].samples);  
 	submit_gauge_value(mac, "trace_rtt", "min", tmp[i].min);  
 	submit_gauge_value(mac, "trace_rtt", "max", tmp[i].max);  
+	submit_gauge_value(mac, "trace_rtt", "sum", tmp[i].sum);  
 	submit_gauge_value(mac, "trace_rtt", "mean", tmp[i].mean);  
 	submit_gauge_value(mac, "trace_rtt", "std", tmp[i].std);  
       }
