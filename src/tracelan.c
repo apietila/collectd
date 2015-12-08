@@ -121,7 +121,7 @@ static void tracelan_finalize_report() {
   int i;
   for (i = 0; i < report_len && reports[i].used; i++) {  
     if (reports[i].samples > 1) {
-      reports[i].mean = reports[i].sum/reports[i].samples;
+      reports[i].mean = reports[i].sum/(double)reports[i].samples;
       reports[i].std = _stddev(reports[i].samples, 
 			       reports[i].sum, 
 			       reports[i].ssq);
@@ -457,13 +457,13 @@ static int tracelan_read(void) {
   pthread_mutex_lock(&report_mutex);
 
   tracelan_finalize_report();
+
   for (i = 0; i < report_len; i++) {  
+    tmp[i].used = 0;
     if (reports[i].used) {
       tmp[i] = reports[i];
       for (j = 0; j < 6; j++)
 	tmp[i].mac[j] = reports[i].mac[j];
-    } else {
-      tmp[i].used = 0;
     }
   }
   tracelan_reset_report();
